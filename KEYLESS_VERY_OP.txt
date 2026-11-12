@@ -1,0 +1,781 @@
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService     = game:GetService("TweenService")
+
+local LocalPlayer = Players.LocalPlayer
+local Camera      = workspace.CurrentCamera
+
+------------------------------------------------------------------
+-- CONFIG (everything here is editable live from the menu)
+------------------------------------------------------------------
+local Config = {
+	Aimbot = {
+		Enabled      = true,
+		AlwaysOn     = false,               -- true = locks without holding a key
+		AimKey       = Enum.UserInputType.MouseButton2,
+		TargetPart   = "Head",              -- Head / UpperTorso / HumanoidRootPart
+		Smoothness   = 1,                   -- 1 = instant snap (blatant), higher = slower
+		FOV          = 400,                 -- radius in pixels
+		ShowFOV      = true,
+		WallCheck    = false,               -- false = locks through walls
+		MaxDistance  = 2000,
+		-- TeamCheck is hard-wired on, there is no option to disable it.
+	},
+	Chams = {
+		Enabled          = true,
+		ShowTeammates    = true,
+		ShowEnemies      = true,
+		TeamColor        = Color3.fromRGB(0, 120, 255),   -- blue
+		EnemyColor       = Color3.fromRGB(255, 0, 0),     -- red
+		FillTransparency = 0.5,
+		OutlineTransparency = 0,
+		AlwaysOnTop      = true,
+	},
+	Rage = {
+		Enabled     = true,
+		TeleportKey = Enum.KeyCode.X,       -- press to teleport behind an enemy
+		StickMode   = false,                -- true = stay glued behind the enemy while key is held
+		TargetMode  = "Nearest",            -- "Nearest" or "Lowest Health"
+		Distance    = 4,                    -- studs behind the enemy
+		Height      = 0,                    -- studs above the enemy's root
+		Cooldown    = 0.5,                  -- seconds between teleports (tap mode)
+		FaceTarget  = true,
+	},
+	Menu = {
+		ToggleKey = Enum.KeyCode.RightShift,
+		Language  = "English",              -- "English" or "Afrikaans"
+	},
+}
+
+local TARGET_PARTS = { "Head", "UpperTorso", "HumanoidRootPart" }
+
+------------------------------------------------------------------
+-- LANGUAGES (add more by copying the Afrikaans table)
+------------------------------------------------------------------
+local Strings = {
+	Afrikaans = {
+		["REALISTIC HOME DEFENSE"] = "REALISTIESE HUISVERDEDIGING",
+		["Aimbot"] = "Teikenbot",
+		["Visuals"] = "Visuele",
+		["Settings"] = "Instellings",
+
+		["Enable Aimbot"] = "Aktiveer Teikenbot",
+		["Always On (no key needed)"] = "Altyd Aan (geen sleutel nodig)",
+		["Aim Key (hold)"] = "Teiksleutel (hou)",
+		["Target Part"] = "Teikendeel",
+		["Smoothness (1 = snap)"] = "Gladheid (1 = onmiddellik)",
+		["FOV Radius"] = "Gesigsveld-radius",
+		["Show FOV Circle"] = "Wys Gesigsveld-sirkel",
+		["Wall Check"] = "Muurkontrole",
+		["Max Distance"] = "Maksimum Afstand",
+
+		["Enable Chams"] = "Aktiveer Chams",
+		["Show Teammates"] = "Wys Spanmaats",
+		["Show Enemies"] = "Wys Vyande",
+		["Teammate Colour (blue)"] = "Spanmaatkleur (blou)",
+		["Enemy Colour (red)"] = "Vyandkleur (rooi)",
+		["Fill Transparency"] = "Vul-deursigtigheid",
+		["Outline Transparency"] = "Buitelyn-deursigtigheid",
+		["Visible Through Walls"] = "Sigbaar Deur Mure",
+
+		["Rage"] = "Rage",
+		["Enable Rage"] = "Aktiveer Rage",
+		["Teleport Now"] = "Teleporteer Nou",
+		["Teleport Key"] = "Teleporteer-sleutel",
+		["Stick Behind (hold key)"] = "Bly Agter Vyand (hou sleutel)",
+		["Target Mode"] = "Teikenmodus",
+		["Nearest"] = "Naaste",
+		["Lowest Health"] = "Laagste Gesondheid",
+		["Distance Behind"] = "Afstand Agter",
+		["Height Offset"] = "Hoogte-verskuiwing",
+		["Teleport Cooldown"] = "Teleporteer-afkoeltyd",
+		["Face Target"] = "Kyk na Teiken",
+
+		["Menu Toggle Key"] = "Kieslys-sleutel",
+		["Language / Taal"] = "Language / Taal",
+		["Team check is always enabled.\nTeammates = blue, enemies = red."] =
+			"Spankontrole is altyd aan.\nSpanmaats = blou, vyande = rooi.",
+
+		["Head"] = "Kop",
+		["UpperTorso"] = "Bolyf",
+		["HumanoidRootPart"] = "Worteldeel",
+		["Mouse 1"] = "Muis 1",
+		["Mouse 2"] = "Muis 2",
+		["Mouse 3"] = "Muis 3",
+		["press a key..."] = "druk 'n sleutel...",
+	},
+}
+
+local translatables = {}
+
+local function T(s)
+	local map = Strings[Config.Menu.Language]
+	return (map and map[s]) or s
+end
+
+local function bind(inst, fn)
+	local function upd() inst.Text = fn() end
+	upd()
+	table.insert(translatables, upd)
+	return upd
+end
+
+local function refreshLanguage()
+	for _, upd in ipairs(translatables) do upd() end
+end
+
+------------------------------------------------------------------
+-- HELPERS
+------------------------------------------------------------------
+local function isEnemy(plr)
+	if plr == LocalPlayer then return false end
+	-- Always team-checked: same team (or both teamless) = not an enemy
+	if not LocalPlayer.Team or not plr.Team then return false end
+	return plr.Team ~= LocalPlayer.Team
+end
+
+local function isTeammate(plr)
+	if plr == LocalPlayer then return false end
+	return LocalPlayer.Team ~= nil and plr.Team == LocalPlayer.Team
+end
+
+local function getAlive(plr)
+	local char = plr.Character
+	if not char then return end
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if not hum or hum.Health <= 0 then return end
+	return char, hum
+end
+
+local function getPart(char)
+	local name = Config.Aimbot.TargetPart
+	return char:FindFirstChild(name)
+		or char:FindFirstChild("Head")
+		or char:FindFirstChild("HumanoidRootPart")
+end
+
+------------------------------------------------------------------
+-- CHAMS
+------------------------------------------------------------------
+local highlights = {}
+
+local function removeHighlight(plr)
+	local h = highlights[plr]
+	if h then h:Destroy() end
+	highlights[plr] = nil
+end
+
+local function updateChams()
+	local cfg = Config.Chams
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr ~= LocalPlayer then
+			local char = getAlive(plr)
+			local team, enemy = isTeammate(plr), isEnemy(plr)
+			local want = cfg.Enabled and char
+				and ((team and cfg.ShowTeammates) or (enemy and cfg.ShowEnemies))
+
+			if want then
+				local h = highlights[plr]
+				if not h or h.Parent ~= char then
+					if h then h:Destroy() end
+					h = Instance.new("Highlight")
+					h.Name = "HD_Cham"
+					h.Parent = char
+					highlights[plr] = h
+				end
+				h.Adornee = char
+				h.FillColor = team and cfg.TeamColor or cfg.EnemyColor
+				h.OutlineColor = team and cfg.TeamColor or cfg.EnemyColor
+				h.FillTransparency = cfg.FillTransparency
+				h.OutlineTransparency = cfg.OutlineTransparency
+				h.DepthMode = cfg.AlwaysOnTop
+					and Enum.HighlightDepthMode.AlwaysOnTop
+					or Enum.HighlightDepthMode.Occluded
+			else
+				removeHighlight(plr)
+			end
+		end
+	end
+end
+
+Players.PlayerRemoving:Connect(removeHighlight)
+
+------------------------------------------------------------------
+-- AIMBOT
+------------------------------------------------------------------
+local aimHeld = false
+
+local function matchesAimKey(input)
+	local key = Config.Aimbot.AimKey
+	return input.KeyCode == key or input.UserInputType == key
+end
+
+local rayParams = RaycastParams.new()
+rayParams.FilterType = Enum.RaycastFilterType.Exclude
+
+local function visible(part, char)
+	rayParams.FilterDescendantsInstances = { LocalPlayer.Character, Camera }
+	local origin = Camera.CFrame.Position
+	local result = workspace:Raycast(origin, part.Position - origin, rayParams)
+	return result == nil or result.Instance:IsDescendantOf(char)
+end
+
+local function getTarget()
+	local cfg = Config.Aimbot
+	local mouse = UserInputService:GetMouseLocation()
+	local best, bestDist
+
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if isEnemy(plr) then -- team check always enforced
+			local char = getAlive(plr)
+			local part = char and getPart(char)
+			if part then
+				local worldDist = (part.Position - Camera.CFrame.Position).Magnitude
+				if worldDist <= cfg.MaxDistance then
+					local pos, onScreen = Camera:WorldToViewportPoint(part.Position)
+					if onScreen then
+						local d = (Vector2.new(pos.X, pos.Y) - mouse).Magnitude
+						if d <= cfg.FOV and (not bestDist or d < bestDist)
+							and (not cfg.WallCheck or visible(part, char)) then
+							best, bestDist = part, d
+						end
+					end
+				end
+			end
+		end
+	end
+	return best
+end
+
+RunService:BindToRenderStep("HD_Aimbot", Enum.RenderPriority.Camera.Value + 1, function()
+	Camera = workspace.CurrentCamera
+	local cfg = Config.Aimbot
+	if not cfg.Enabled then return end
+	if not (cfg.AlwaysOn or aimHeld) then return end
+
+	local target = getTarget()
+	if not target then return end
+
+	local goal = CFrame.new(Camera.CFrame.Position, target.Position)
+	if cfg.Smoothness <= 1 then
+		Camera.CFrame = goal
+	else
+		Camera.CFrame = Camera.CFrame:Lerp(goal, 1 / cfg.Smoothness)
+	end
+end)
+
+------------------------------------------------------------------
+-- RAGE: teleport behind enemies (team check always enforced)
+------------------------------------------------------------------
+local lastRebind = 0   -- used so rebinding a key doesn't also trigger it
+local rageHeld = false
+local rageTarget = nil
+local lastTP = 0
+
+local function matchesKey(input, key)
+	return input.KeyCode == key or input.UserInputType == key
+end
+
+local function getRoot(char)
+	return char and (char:FindFirstChild("HumanoidRootPart")
+		or char.PrimaryPart
+		or char:FindFirstChild("UpperTorso")
+		or char:FindFirstChild("Torso"))
+end
+
+local function findRageTarget()
+	local myRoot = getRoot(LocalPlayer.Character)
+	if not myRoot then return end
+
+	local best, bestScore
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if isEnemy(plr) then
+			local char, hum = getAlive(plr)
+			local root = getRoot(char)
+			if root then
+				local score = (Config.Rage.TargetMode == "Lowest Health")
+					and hum.Health or (root.Position - myRoot.Position).Magnitude
+				if not bestScore or score < bestScore then
+					best, bestScore = char, score
+				end
+			end
+		end
+	end
+	return best
+end
+
+local function teleportBehind(targetChar)
+	local cfg = Config.Rage
+	local myChar = LocalPlayer.Character
+	local myRoot = getRoot(myChar)
+	local tRoot = getRoot(targetChar)
+	if not (myChar and myRoot and tRoot) then return end
+
+	local pos = tRoot.Position - tRoot.CFrame.LookVector * cfg.Distance + Vector3.new(0, cfg.Height, 0)
+	local cf
+	if cfg.FaceTarget then
+		cf = CFrame.new(pos, Vector3.new(tRoot.Position.X, pos.Y, tRoot.Position.Z))
+	else
+		cf = CFrame.new(pos)
+	end
+	myRoot.AssemblyLinearVelocity = Vector3.zero
+	myChar:PivotTo(cf)
+end
+
+local function rageTeleportNow()
+	local t = findRageTarget()
+	if t then
+		teleportBehind(t)
+	else
+		warn("[HD Rage] No alive enemy found (are players on different Teams?)")
+	end
+end
+
+UserInputService.InputBegan:Connect(function(input)
+	if UserInputService:GetFocusedTextBox() then return end
+	if os.clock() - lastRebind < 0.25 then return end
+	local cfg = Config.Rage
+	if not cfg.Enabled or not matchesKey(input, cfg.TeleportKey) then return end
+
+	rageHeld = true
+	rageTarget = findRageTarget()
+	if not rageTarget then
+		warn("[HD Rage] No alive enemy found (are players on different Teams?)")
+		return
+	end
+	if not cfg.StickMode and os.clock() - lastTP >= cfg.Cooldown then
+		lastTP = os.clock()
+		teleportBehind(rageTarget)
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+	if matchesKey(input, Config.Rage.TeleportKey) then
+		rageHeld = false
+		rageTarget = nil
+	end
+end)
+
+RunService.Heartbeat:Connect(function()
+	local cfg = Config.Rage
+	if not (cfg.Enabled and cfg.StickMode and rageHeld) then return end
+	local tPlr = rageTarget and Players:GetPlayerFromCharacter(rageTarget)
+	if not tPlr or not rageTarget.Parent or not getAlive(tPlr) then
+		rageTarget = findRageTarget()
+	end
+	if rageTarget then teleportBehind(rageTarget) end
+end)
+
+------------------------------------------------------------------
+-- GUI
+------------------------------------------------------------------
+local ACCENT   = Color3.fromRGB(255, 70, 70)
+local BG       = Color3.fromRGB(18, 18, 24)
+local PANEL    = Color3.fromRGB(28, 28, 38)
+local ELEMENT  = Color3.fromRGB(38, 38, 52)
+local TEXT     = Color3.fromRGB(235, 235, 245)
+local SUBTEXT  = Color3.fromRGB(150, 150, 170)
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "HD_Menu"
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+local function corner(inst, r)
+	local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, r or 8); c.Parent = inst
+end
+local function stroke(inst, color, th)
+	local s = Instance.new("UIStroke"); s.Color = color; s.Thickness = th or 1
+	s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border; s.Parent = inst; return s
+end
+local function label(parent, text, size, color, font, static)
+	local l = Instance.new("TextLabel")
+	l.BackgroundTransparency = 1
+	l.Text = text; l.TextSize = size or 14
+	l.TextColor3 = color or TEXT
+	l.Font = font or Enum.Font.GothamMedium
+	l.TextXAlignment = Enum.TextXAlignment.Left
+	l.Parent = parent
+	if not static then bind(l, function() return T(text) end) end
+	return l
+end
+
+-- FOV circle
+local fovCircle = Instance.new("Frame")
+fovCircle.AnchorPoint = Vector2.new(0.5, 0.5)
+fovCircle.BackgroundTransparency = 1
+fovCircle.Parent = gui
+corner(fovCircle, 9999)
+local fovStroke = stroke(fovCircle, ACCENT, 1.5)
+
+RunService.RenderStepped:Connect(function()
+	local cfg = Config.Aimbot
+	fovCircle.Visible = cfg.Enabled and cfg.ShowFOV
+	fovCircle.Size = UDim2.fromOffset(cfg.FOV * 2, cfg.FOV * 2)
+	local m = UserInputService:GetMouseLocation()
+	fovCircle.Position = UDim2.fromOffset(m.X, m.Y)
+end)
+
+-- Main window
+local main = Instance.new("Frame")
+main.Name = "Main"
+main.Size = UDim2.fromOffset(420, 460)
+main.Position = UDim2.new(0.5, -210, 0.5, -230)
+main.BackgroundColor3 = BG
+main.BorderSizePixel = 0
+main.Parent = gui
+corner(main, 12)
+stroke(main, ACCENT, 1.5)
+
+local titleBar = Instance.new("Frame")
+titleBar.Size = UDim2.new(1, 0, 0, 44)
+titleBar.BackgroundColor3 = PANEL
+titleBar.BorderSizePixel = 0
+titleBar.Parent = main
+corner(titleBar, 12)
+
+local title = label(titleBar, "REALISTIC HOME DEFENSE", 16, TEXT, Enum.Font.GothamBold)
+title.Position = UDim2.fromOffset(16, 0)
+title.Size = UDim2.new(1, -60, 1, 0)
+
+local closeBtn = Instance.new("TextButton")
+closeBtn.Size = UDim2.fromOffset(28, 28)
+closeBtn.Position = UDim2.new(1, -38, 0, 8)
+closeBtn.BackgroundColor3 = ELEMENT
+closeBtn.Text = "X"
+closeBtn.TextColor3 = TEXT
+closeBtn.Font = Enum.Font.GothamBold
+closeBtn.TextSize = 14
+closeBtn.Parent = titleBar
+corner(closeBtn, 6)
+
+-- Invisible modal button: frees the mouse cursor while the menu is open
+-- (fixes buttons/sliders not being clickable in first-person / mouse-locked games)
+local modalBtn = Instance.new("TextButton")
+modalBtn.Size = UDim2.fromOffset(1, 1)
+modalBtn.BackgroundTransparency = 1
+modalBtn.Text = ""
+modalBtn.Modal = true
+modalBtn.Parent = main
+
+-- Dragging
+do
+	local dragging, dragStart, startPos
+	titleBar.InputBegan:Connect(function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1 then
+			dragging, dragStart, startPos = true, i.Position, main.Position
+		end
+	end)
+	UserInputService.InputChanged:Connect(function(i)
+		if dragging and i.UserInputType == Enum.UserInputType.MouseMovement then
+			local d = i.Position - dragStart
+			main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X,
+				startPos.Y.Scale, startPos.Y.Offset + d.Y)
+		end
+	end)
+	UserInputService.InputEnded:Connect(function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+	end)
+end
+
+-- Tabs
+local tabBar = Instance.new("Frame")
+tabBar.Size = UDim2.new(1, -24, 0, 34)
+tabBar.Position = UDim2.fromOffset(12, 52)
+tabBar.BackgroundTransparency = 1
+tabBar.Parent = main
+local tabLayout = Instance.new("UIListLayout")
+tabLayout.FillDirection = Enum.FillDirection.Horizontal
+tabLayout.Padding = UDim.new(0, 8)
+tabLayout.Parent = tabBar
+
+local pages, tabButtons = {}, {}
+
+local function selectTab(name)
+	for n, p in pairs(pages) do
+		p.Visible = (n == name)
+		tabButtons[n].BackgroundColor3 = (n == name) and ACCENT or ELEMENT
+		tabButtons[n].TextColor3 = (n == name) and Color3.new(1, 1, 1) or SUBTEXT
+	end
+end
+
+local function makePage(name)
+	local page = Instance.new("ScrollingFrame")
+	page.Size = UDim2.new(1, -24, 1, -100)
+	page.Position = UDim2.fromOffset(12, 92)
+	page.BackgroundTransparency = 1
+	page.BorderSizePixel = 0
+	page.ScrollBarThickness = 4
+	page.ScrollBarImageColor3 = ACCENT
+	page.CanvasSize = UDim2.new()
+	page.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	page.Visible = false
+	page.Parent = main
+	local l = Instance.new("UIListLayout"); l.Padding = UDim.new(0, 8); l.Parent = page
+	pages[name] = page
+
+	local btn = Instance.new("TextButton")
+	btn.Size = UDim2.fromOffset(92, 34)
+	btn.BackgroundColor3 = ELEMENT
+	btn.Text = name
+	btn.TextColor3 = SUBTEXT
+	btn.Font = Enum.Font.GothamBold
+	btn.TextSize = 13
+	btn.Parent = tabBar
+	corner(btn, 8)
+	tabButtons[name] = btn
+	bind(btn, function() return T(name) end)
+
+	btn.MouseButton1Click:Connect(function() selectTab(name) end)
+	return page
+end
+
+local function rowFrame(parent, h)
+	local f = Instance.new("Frame")
+	f.Size = UDim2.new(1, -8, 0, h or 38)
+	f.BackgroundColor3 = PANEL
+	f.BorderSizePixel = 0
+	f.Parent = parent
+	corner(f, 8)
+	return f
+end
+
+local function addToggle(parent, text, get, set)
+	local f = rowFrame(parent)
+	local l = label(f, text, 14); l.Position = UDim2.fromOffset(12, 0); l.Size = UDim2.new(1, -70, 1, 0)
+	local box = Instance.new("TextButton")
+	box.Size = UDim2.fromOffset(44, 22); box.Position = UDim2.new(1, -56, 0.5, -11)
+	box.Text = ""; box.AutoButtonColor = false; box.Parent = f
+	corner(box, 11)
+	local knob = Instance.new("Frame")
+	knob.Size = UDim2.fromOffset(18, 18); knob.BackgroundColor3 = Color3.new(1, 1, 1)
+	knob.Parent = box; corner(knob, 9)
+	local function render()
+		local on = get()
+		TweenService:Create(box, TweenInfo.new(0.15), { BackgroundColor3 = on and ACCENT or ELEMENT }):Play()
+		TweenService:Create(knob, TweenInfo.new(0.15),
+			{ Position = on and UDim2.fromOffset(24, 2) or UDim2.fromOffset(2, 2) }):Play()
+	end
+	box.MouseButton1Click:Connect(function() set(not get()); render() end)
+	render()
+end
+
+local activeSlider
+local function addSlider(parent, text, min, max, step, get, set)
+	local f = rowFrame(parent, 52)
+	local l = label(f, text, 14); l.Position = UDim2.fromOffset(12, 4); l.Size = UDim2.new(1, -90, 0, 20)
+	local v = label(f, "", 14, SUBTEXT, nil, true); v.TextXAlignment = Enum.TextXAlignment.Right
+	v.Position = UDim2.new(1, -82, 0, 4); v.Size = UDim2.fromOffset(70, 20)
+	local track = Instance.new("Frame")
+	track.Size = UDim2.new(1, -24, 0, 6); track.Position = UDim2.fromOffset(12, 36)
+	track.BackgroundColor3 = ELEMENT; track.BorderSizePixel = 0; track.Parent = f
+	corner(track, 3)
+	local fill = Instance.new("Frame")
+	fill.BackgroundColor3 = ACCENT; fill.BorderSizePixel = 0; fill.Parent = track
+	corner(fill, 3)
+
+	local function render()
+		local a = (get() - min) / (max - min)
+		fill.Size = UDim2.new(math.clamp(a, 0, 1), 0, 1, 0)
+		v.Text = tostring(get())
+	end
+	local function fromX(x)
+		local a = math.clamp((x - track.AbsolutePosition.X) / track.AbsoluteSize.X, 0, 1)
+		local val = min + (max - min) * a
+		val = math.floor(val / step + 0.5) * step
+		set(math.round(val * 1000) / 1000)
+		render()
+	end
+	track.InputBegan:Connect(function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1 then
+			activeSlider = fromX; fromX(i.Position.X)
+		end
+	end)
+	render()
+end
+
+UserInputService.InputChanged:Connect(function(i)
+	if activeSlider and i.UserInputType == Enum.UserInputType.MouseMovement then
+		activeSlider(i.Position.X)
+	end
+end)
+UserInputService.InputEnded:Connect(function(i)
+	if i.UserInputType == Enum.UserInputType.MouseButton1 then activeSlider = nil end
+end)
+
+local rebinding
+local function keyName(k)
+	if k.EnumType == Enum.UserInputType then
+		return k == Enum.UserInputType.MouseButton1 and T("Mouse 1")
+			or k == Enum.UserInputType.MouseButton2 and T("Mouse 2")
+			or k == Enum.UserInputType.MouseButton3 and T("Mouse 3") or k.Name
+	end
+	return k.Name
+end
+
+local function addKeybind(parent, text, get, set)
+	local f = rowFrame(parent)
+	local l = label(f, text, 14); l.Position = UDim2.fromOffset(12, 0); l.Size = UDim2.new(1, -130, 1, 0)
+	local b = Instance.new("TextButton")
+	b.Size = UDim2.fromOffset(110, 26); b.Position = UDim2.new(1, -122, 0.5, -13)
+	b.BackgroundColor3 = ELEMENT; b.TextColor3 = TEXT
+	b.Font = Enum.Font.GothamBold; b.TextSize = 13
+	b.Parent = f
+	local upd = bind(b, function() return keyName(get()) end)
+	corner(b, 6)
+	b.MouseButton1Click:Connect(function()
+		b.Text = T("press a key...")
+		rebinding = function(key) lastRebind = os.clock(); set(key); upd() end
+	end)
+end
+
+local function addCycle(parent, text, options, get, set, raw)
+	local f = rowFrame(parent)
+	local l = label(f, text, 14); l.Position = UDim2.fromOffset(12, 0); l.Size = UDim2.new(1, -150, 1, 0)
+	local b = Instance.new("TextButton")
+	b.Size = UDim2.fromOffset(130, 26); b.Position = UDim2.new(1, -142, 0.5, -13)
+	b.BackgroundColor3 = ELEMENT; b.TextColor3 = TEXT
+	b.Font = Enum.Font.GothamBold; b.TextSize = 13
+	b.Parent = f
+	local upd = bind(b, function() return raw and get() or T(get()) end)
+	corner(b, 6)
+	b.MouseButton1Click:Connect(function()
+		local idx = table.find(options, get()) or 0
+		set(options[idx % #options + 1]); upd()
+	end)
+end
+
+local function addColor(parent, text, get, set)
+	local presets = {
+		Color3.fromRGB(0, 120, 255), Color3.fromRGB(255, 0, 0), Color3.fromRGB(0, 255, 100),
+		Color3.fromRGB(255, 220, 0), Color3.fromRGB(180, 0, 255), Color3.fromRGB(255, 255, 255),
+	}
+	local f = rowFrame(parent)
+	local l = label(f, text, 14); l.Position = UDim2.fromOffset(12, 0); l.Size = UDim2.new(1, -100, 1, 0)
+	local sw = Instance.new("TextButton")
+	sw.Size = UDim2.fromOffset(60, 24); sw.Position = UDim2.new(1, -72, 0.5, -12)
+	sw.Text = ""; sw.BackgroundColor3 = get(); sw.Parent = f
+	corner(sw, 6)
+	sw.MouseButton1Click:Connect(function()
+		local idx = 0
+		for i, c in ipairs(presets) do if c == get() then idx = i break end end
+		local nxt = presets[idx % #presets + 1]
+		set(nxt); sw.BackgroundColor3 = nxt
+	end)
+end
+
+-- Aimbot tab
+local A = Config.Aimbot
+local aimPage = makePage("Aimbot")
+addToggle(aimPage, "Enable Aimbot", function() return A.Enabled end, function(v) A.Enabled = v end)
+addToggle(aimPage, "Always On (no key needed)", function() return A.AlwaysOn end, function(v) A.AlwaysOn = v end)
+addKeybind(aimPage, "Aim Key (hold)", function() return A.AimKey end, function(k) A.AimKey = k end)
+addCycle(aimPage, "Target Part", TARGET_PARTS, function() return A.TargetPart end, function(v) A.TargetPart = v end)
+addSlider(aimPage, "Smoothness (1 = snap)", 1, 20, 1, function() return A.Smoothness end, function(v) A.Smoothness = v end)
+addSlider(aimPage, "FOV Radius", 20, 1000, 10, function() return A.FOV end, function(v) A.FOV = v end)
+addToggle(aimPage, "Show FOV Circle", function() return A.ShowFOV end, function(v) A.ShowFOV = v end)
+addToggle(aimPage, "Wall Check", function() return A.WallCheck end, function(v) A.WallCheck = v end)
+addSlider(aimPage, "Max Distance", 50, 5000, 50, function() return A.MaxDistance end, function(v) A.MaxDistance = v end)
+
+-- Visuals tab
+local C = Config.Chams
+local visPage = makePage("Visuals")
+addToggle(visPage, "Enable Chams", function() return C.Enabled end, function(v) C.Enabled = v end)
+addToggle(visPage, "Show Teammates", function() return C.ShowTeammates end, function(v) C.ShowTeammates = v end)
+addToggle(visPage, "Show Enemies", function() return C.ShowEnemies end, function(v) C.ShowEnemies = v end)
+addColor(visPage, "Teammate Colour (blue)", function() return C.TeamColor end, function(v) C.TeamColor = v end)
+addColor(visPage, "Enemy Colour (red)", function() return C.EnemyColor end, function(v) C.EnemyColor = v end)
+addSlider(visPage, "Fill Transparency", 0, 1, 0.05, function() return C.FillTransparency end, function(v) C.FillTransparency = v end)
+addSlider(visPage, "Outline Transparency", 0, 1, 0.05, function() return C.OutlineTransparency end, function(v) C.OutlineTransparency = v end)
+addToggle(visPage, "Visible Through Walls", function() return C.AlwaysOnTop end, function(v) C.AlwaysOnTop = v end)
+
+local function addButton(parent, text, callback)
+	local f = rowFrame(parent)
+	local b = Instance.new("TextButton")
+	b.Size = UDim2.new(1, -16, 0, 26); b.Position = UDim2.fromOffset(8, 6)
+	b.BackgroundColor3 = ACCENT; b.TextColor3 = Color3.new(1, 1, 1)
+	b.Font = Enum.Font.GothamBold; b.TextSize = 14; b.Parent = f
+	corner(b, 6)
+	bind(b, function() return T(text) end)
+	b.MouseButton1Click:Connect(callback)
+end
+
+-- Rage tab
+local R = Config.Rage
+local ragePage = makePage("Rage")
+addToggle(ragePage, "Enable Rage", function() return R.Enabled end, function(v) R.Enabled = v end)
+addButton(ragePage, "Teleport Now", rageTeleportNow)
+addKeybind(ragePage, "Teleport Key", function() return R.TeleportKey end, function(k) R.TeleportKey = k end)
+addToggle(ragePage, "Stick Behind (hold key)", function() return R.StickMode end, function(v) R.StickMode = v end)
+addCycle(ragePage, "Target Mode", { "Nearest", "Lowest Health" }, function() return R.TargetMode end, function(v) R.TargetMode = v end)
+addSlider(ragePage, "Distance Behind", 1, 15, 0.5, function() return R.Distance end, function(v) R.Distance = v end)
+addSlider(ragePage, "Height Offset", 0, 10, 0.5, function() return R.Height end, function(v) R.Height = v end)
+addSlider(ragePage, "Teleport Cooldown", 0, 5, 0.1, function() return R.Cooldown end, function(v) R.Cooldown = v end)
+addToggle(ragePage, "Face Target", function() return R.FaceTarget end, function(v) R.FaceTarget = v end)
+
+-- Settings tab
+local setPage = makePage("Settings")
+addKeybind(setPage, "Menu Toggle Key", function() return Config.Menu.ToggleKey end, function(k) Config.Menu.ToggleKey = k end)
+addCycle(setPage, "Language / Taal", { "English", "Afrikaans" },
+	function() return Config.Menu.Language end,
+	function(v) Config.Menu.Language = v; refreshLanguage() end, true)
+local info = label(setPage, "Team check is always enabled.\nTeammates = blue, enemies = red.", 13, SUBTEXT)
+info.Size = UDim2.new(1, -8, 0, 40)
+info.TextWrapped = true
+
+selectTab("Aimbot")
+
+-- Open / close
+local function setMenu(open)
+	main.Visible = open
+end
+closeBtn.MouseButton1Click:Connect(function() setMenu(false) end)
+
+------------------------------------------------------------------
+-- INPUT
+------------------------------------------------------------------
+UserInputService.InputBegan:Connect(function(input, processed)
+	-- Rebinding takes priority
+	if rebinding then
+		local key
+		if input.UserInputType == Enum.UserInputType.Keyboard then
+			key = input.KeyCode
+		elseif input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.MouseButton2
+			or input.UserInputType == Enum.UserInputType.MouseButton3 then
+			key = input.UserInputType
+		end
+		if key and key ~= Enum.UserInputType.MouseButton1 then
+			local cb = rebinding; rebinding = nil; cb(key)
+		end
+		return
+	end
+
+	if input.KeyCode == Config.Menu.ToggleKey then
+		setMenu(not main.Visible)
+		return
+	end
+	if matchesAimKey(input) then aimHeld = true end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+	if matchesAimKey(input) then aimHeld = false end
+end)
+
+------------------------------------------------------------------
+-- LOOP
+------------------------------------------------------------------
+RunService.Heartbeat:Connect(function()
+	local ok, err = pcall(updateChams)
+	if not ok then warn("[HD Chams] " .. tostring(err)) end
+end)
+
+-- Clean up highlights when a player's character is removed / respawns
+local function hookPlayer(plr)
+	plr.CharacterRemoving:Connect(function() removeHighlight(plr) end)
+end
+for _, plr in ipairs(Players:GetPlayers()) do hookPlayer(plr) end
+Players.PlayerAdded:Connect(hookPlayer)
